@@ -29,3 +29,5 @@ bot-telegram-sheets-test-*.json
 # OS
 .DS_Store
 Thumbs.db
+
+deploy.txt

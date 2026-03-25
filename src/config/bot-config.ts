@@ -1,4 +1,4 @@
-import type { BotConfig } from './bot-config.schema.js';
+import type { BotConfig } from "./bot-config.schema.js";
 
 /**
  * ============================================================
@@ -10,46 +10,52 @@ export const botConfig: BotConfig = {
   // --------------------------------------------------------
   // Google Spreadsheet
   // --------------------------------------------------------
-  spreadsheetId: process.env.SPREADSHEET_ID || 'YOUR_SPREADSHEET_ID',
+  spreadsheetId: process.env.SPREADSHEET_ID || "YOUR_SPREADSHEET_ID",
 
   // --------------------------------------------------------
   // Sheets & Columns
   // --------------------------------------------------------
   sheets: [
     {
-      name: 'Ventas',
-      actions: ['append'],
+      name: "Ventas",
+      actions: ["append"],
       columns: [
         {
-          name: 'Fecha',
-          type: 'date',
+          name: "Fecha",
+          type: "date",
           required: false,
-          description: 'Fecha de la venta',
-          autoFill: 'today',
+          description: "Fecha de la venta",
+          autoFill: "today",
         },
         {
-          name: 'Clienta/e',
-          type: 'string',
+          name: "Clienta/e",
+          type: "string",
           required: true,
-          description: 'Nombre de la persona que compró',
+          description: "Nombre de la persona que compró",
         },
         {
-          name: 'Prendas',
-          type: 'string',
+          name: "Prendas",
+          type: "string",
           required: true,
-          description: 'Prendas o productos vendidos',
+          description: "Prendas o productos vendidos",
         },
         {
-          name: 'Monto $',
-          type: 'number',
+          name: "Monto $",
+          type: "number",
           required: true,
-          description: 'Monto total de la venta en pesos',
+          description: "Monto total de la venta en pesos",
         },
         {
-          name: 'Tipo Pago',
-          type: 'string',
+          name: "Tipo Pago",
+          type: "string",
           required: true,
-          description: 'Forma de pago (efectivo, transferencia, tarjeta, etc.)',
+          description: "Forma de pago (efectivo, transferencia, tarjeta, etc.)",
+        },
+        {
+          name: "Medida",
+          type: "string",
+          required: true,
+          description: "Talle de la prenda",
         },
       ],
     },
@@ -59,12 +65,8 @@ export const botConfig: BotConfig = {
   // AI Configuration
   // --------------------------------------------------------
   ai: {
-    provider: 'groq',
-    models: [
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'gemma2-9b-it',
-    ],
+    provider: "groq",
+    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
     // systemPrompt is auto-generated from columns if omitted.
     // Uncomment to override:
     // systemPrompt: 'Sos un asistente que extrae datos de ventas...',
@@ -76,17 +78,18 @@ export const botConfig: BotConfig = {
   // --------------------------------------------------------
   conversation: {
     askForMissing: true,
-    missingDefault: '-',
+    missingDefault: "-",
     stateTtlMinutes: 5,
-    stateSheetName: '_state',
+    stateSheetName: "_state",
   },
 
   // --------------------------------------------------------
   // Bot Messages
   // --------------------------------------------------------
   messages: {
-    welcome: '¡Hola! Enviame los datos de una venta y la registro.',
-    confirmation: '✅ Registrado: {{Clienta/e}} — {{Prendas}} — ${{Monto $}} — {{Tipo Pago}}',
-    error: 'Ocurrió un error procesando tu mensaje. Intentalo de nuevo.',
+    welcome: "¡Hola! Enviame los datos de una venta y la registro.",
+    confirmation:
+      "✅ Registrado: {{Clienta/e}} — {{Prendas}} — ${{Monto $}} — {{Tipo Pago}}",
+    error: "Ocurrió un error procesando tu mensaje. Intentalo de nuevo.",
   },
 };

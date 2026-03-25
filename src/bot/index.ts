@@ -116,7 +116,8 @@ export function createBot(): Bot {
 
       // Lazy import to avoid loading transcribe module when not needed
       const { transcribeAudio } = await import('../ai/transcribe.js');
-      const transcribedText = await transcribeAudio(audioBuffer);
+      const mimeType = voice.mime_type ?? 'audio/ogg';
+      const transcribedText = await transcribeAudio(audioBuffer, mimeType);
 
       await ctx.reply(`🎤 "${transcribedText}"`);
 
