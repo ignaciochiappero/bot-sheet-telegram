@@ -1,93 +1,155 @@
 import { getSheetsClient } from './client.js';
-import { config } from '../config.js';
+import type { SheetConfig } from '../config/bot-config.schema.js';
 
-export interface SalesRecord {
-  producto: string;
-  fecha: string;
-  precio: string;
-}
+// ============================================================
+//  APPEND — Add a new row to the sheet
+// ============================================================
 
-export async function findProductInStock(productName: string): Promise<{
-  rowIndex: number;
-  producto: string;
-  estado: string;
-  precio: string;
-} | null> {
+/**
+ * Appends a row of values to a sheet.
+ * Values must be in column order (matching sheet.columns).
+ */
+export async function appendRow(
+  spreadsheetId: string,
+  sheet: SheetConfig,
+  values: string[],
+): Promise<void> {
   const sheets = getSheetsClient();
-
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: config.SPREADSHEET_ID,
-    range: 'Stock!A:C',
-  });
-
-  const rows = response.data.values || [];
-
-  // Row 0 is header, start from 1
-  for (let i = 1; i < rows.length; i++) {
-    const [producto, estado, precio] = rows[i];
-
-    if (
-      producto?.toLowerCase().includes(productName.toLowerCase()) &&
-      estado?.toLowerCase() === 'disponible'
-    ) {
-      return {
-        rowIndex: i + 1, // 1-indexed for Sheets API
-        producto,
-        estado,
-        precio: precio || '0',
-      };
-    }
-  }
-
-  return null;
-}
-
-export async function markProductAsSold(rowIndex: number): Promise<void> {
-  const sheets = getSheetsClient();
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: config.SPREADSHEET_ID,
-    range: `Stock!B${rowIndex}`,
-    valueInputOption: 'RAW',
-    requestBody: {
-      values: [['Vendido']],
-    },
-  });
-}
-
-export async function appendSale(record: SalesRecord): Promise<void> {
-  const sheets = getSheetsClient();
+  const lastCol = columnIndexToLetter(sheet.columns.length - 1);
 
   await sheets.spreadsheets.values.append({
-    spreadsheetId: config.SPREADSHEET_ID,
-    range: 'Sales!A:C',
+    spreadsheetId,
+    range: `${sheet.name}!A:${lastCol}`,
     valueInputOption: 'RAW',
     requestBody: {
-      values: [[record.producto, record.fecha, record.precio]],
+      values: [values],
     },
   });
 }
 
-export async function processSale(productName: string): Promise<{ success: boolean; message: string }> {
-  const product = await findProductInStock(productName);
+// ============================================================
+//  READ — Get all rows from the sheet (excluding header)
+// ============================================================
 
-  if (!product) {
-    return { success: false, message: `Producto "${productName}" no encontrado en stock o ya vendido.` };
-  }
+export interface SheetRow {
+  /** 1-indexed row number in the sheet (for updates/deletes) */
+  rowIndex: number;
+  /** Key-value pairs: column name → cell value */
+  data: Record<string, string>;
+}
 
-  // Mark as sold
-  await markProductAsSold(product.rowIndex);
+/**
+ * Reads all rows from a sheet and returns them as structured objects.
+ * Row 0 is treated as the header and skipped.
+ */
+export async function readRows(
+  spreadsheetId: string,
+  sheet: SheetConfig,
+): Promise<SheetRow[]> {
+  const sheets = getSheetsClient();
+  const lastCol = columnIndexToLetter(sheet.columns.length - 1);
 
-  // Append to sales
-  const now = new Date().toISOString().split('T')[0];
-  await appendSale({
-    producto: product.producto,
-    fecha: now,
-    precio: product.precio,
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${sheet.name}!A:${lastCol}`,
   });
 
-  return {
-    success: true,
-    message: `✅ Vendido: ${product.producto} - $${product.precio}`,
-  };
+  const rawRows = response.data.values || [];
+  const rows: SheetRow[] = [];
+
+  // Skip header (row 0)
+  for (let i = 1; i < rawRows.length; i++) {
+    const data: Record<string, string> = {};
+
+    sheet.columns.forEach((col, colIndex) => {
+      data[col.name] = rawRows[i][colIndex] ?? '';
+    });
+
+    rows.push({
+      rowIndex: i + 1, // 1-indexed for Sheets API
+      data,
+    });
+  }
+
+  return rows;
+}
+
+// ============================================================
+//  DELETE — Remove a row by its index
+// ============================================================
+
+/**
+ * Deletes a row from a sheet by its 1-indexed row number.
+ * Uses the Sheets batchUpdate API to delete the row structurally.
+ */
+export async function deleteRow(
+  spreadsheetId: string,
+  sheet: SheetConfig,
+  rowIndex: number,
+): Promise<void> {
+  const sheets = getSheetsClient();
+
+  // First we need the sheetId (numeric) — not the tab name
+  const sheetId = await getSheetId(spreadsheetId, sheet.name);
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: 'ROWS',
+              startIndex: rowIndex - 1, // 0-indexed for batchUpdate
+              endIndex: rowIndex,
+            },
+          },
+        },
+      ],
+    },
+  });
+}
+
+// ============================================================
+//  Helpers
+// ============================================================
+
+/**
+ * Gets the numeric sheetId for a tab name.
+ * Needed for batchUpdate operations (delete, etc.).
+ */
+async function getSheetId(spreadsheetId: string, sheetName: string): Promise<number> {
+  const sheets = getSheetsClient();
+
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties',
+  });
+
+  const found = spreadsheet.data.sheets?.find(
+    (s) => s.properties?.title === sheetName,
+  );
+
+  if (!found?.properties?.sheetId && found?.properties?.sheetId !== 0) {
+    throw new Error(`Sheet "${sheetName}" not found in spreadsheet`);
+  }
+
+  return found.properties.sheetId;
+}
+
+/**
+ * Converts a 0-based column index to a sheet letter.
+ * 0 → A, 1 → B, ..., 25 → Z, 26 → AA
+ */
+function columnIndexToLetter(index: number): string {
+  let letter = '';
+  let i = index;
+
+  while (i >= 0) {
+    letter = String.fromCharCode((i % 26) + 65) + letter;
+    i = Math.floor(i / 26) - 1;
+  }
+
+  return letter;
 }

@@ -1,10 +1,20 @@
-# Bot Telegram + Google Sheets
+# Bot Telegram + Google Sheets (Framework Configurable)
 
 ## Descripcion
 
-Bot de Telegram deployado en **AWS Lambda** que recibe mensajes de texto y audio, usa **Groq AI** (LLM para extraccion de productos, Whisper para transcripcion de audio) y actualiza un **Google Sheets** marcando productos como vendidos y registrando ventas automaticamente.
+**Framework configurable** de bot de Telegram deployado en **AWS Lambda** ($0 de costo) que recibe mensajes de texto y audio, usa **Groq AI** con fallback automatico entre modelos para extraer datos estructurados, y los registra en **Google Sheets**.
 
-El usuario le manda un mensaje al bot tipo _"Quiero comprar unas zapatillas"_, el bot extrae el nombre del producto con IA, busca ese producto en la hoja de stock, lo marca como "Vendido" y registra la venta en otra hoja con fecha y precio.
+El bot es **conversacional**: si la IA no puede extraer todos los campos requeridos de un solo mensaje, le pregunta al usuario por los datos faltantes. Todo el comportamiento se define en un **unico archivo de configuracion** (`src/config/bot-config.ts`).
+
+### Caso de uso incluido: Registro de ventas
+
+La config de ejemplo registra ventas en una hoja "Ventas" con las columnas:
+
+| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago |
+|---|---|---|---|---|
+| 2025-01-15 | María | Remera negra + Jean | 45000 | Efectivo |
+
+El usuario le manda al bot algo como _"María compró una remera y un jean por 45 lucas en efectivo"_ y el bot extrae todo automaticamente.
 
 ## Arquitectura
 
@@ -13,17 +23,17 @@ Usuario (Telegram)
     |
     | HTTPS POST (webhook)
     v
-API Gateway (AWS) ──── /webhook (POST) ────> AWS Lambda (Node.js 20)
-                                                  |
-                                                  v
-                                            grammY Bot
-                                                  |
-                                    ┌─────────────┼─────────────┐
-                                    v             v              v
-                              Groq AI        Groq AI      Google Sheets API
-                            (Whisper)     (Llama 3.1)     (googleapis)
-                           Transcribe    Extract product   Stock + Sales
-                             audio         name             CRUD
+API Gateway (AWS) ────> AWS Lambda (Node.js 20)
+                            |
+                            v
+                      grammY Bot Router
+                            |
+              ┌─────────────┼──────────────────┐
+              v             v                  v
+        Groq AI        Groq AI          Google Sheets API
+       (Whisper)    (LLM + Fallback)    (googleapis)
+      Transcribe    Extract data         Append row
+        audio       con Zod schema       Read/Write state
 ```
 
 ### Flujo detallado
@@ -31,12 +41,49 @@ API Gateway (AWS) ──── /webhook (POST) ────> AWS Lambda (Node.js
 1. Telegram envia un POST al webhook (API Gateway URL)
 2. API Gateway forwardea a Lambda con el body como JSON string
 3. `handler.ts` parsea el body y llama `bot.handleUpdate(update)`
-4. grammY routea al handler correspondiente (`message:text` o `message:voice`)
-5. **Texto**: se manda directo a Groq LLM para extraer el nombre del producto
-6. **Audio**: se descarga el archivo de Telegram, se transcribe con Groq Whisper, y despues se extrae el producto del texto transcripto
-7. Se busca el producto en la hoja "Stock" (match parcial, case-insensitive, solo los que estan "Disponible")
-8. Si lo encuentra: marca como "Vendido" en Stock y appendea una fila en "Sales" con producto, fecha y precio
-9. Le responde al usuario con el resultado
+4. El bot router verifica si hay **estado conversacional** (datos parciales de mensajes anteriores)
+5. **Texto**: se manda a Groq LLM para extraer los campos definidos en la config
+6. **Audio**: se descarga → transcribe con Groq Whisper → se extrae como texto
+7. Si la IA extrae **todos los campos requeridos** → se appendea la fila a Google Sheets y se confirma
+8. Si **faltan campos** y la config tiene `askForMissing: true` → se guarda el estado parcial en una hoja oculta (`_state`) y se le pregunta al usuario por los faltantes
+9. El estado conversacional tiene un **TTL configurable** (default: 5 minutos). Despues expira y se empieza de cero.
+
+## Como funciona la configuracion
+
+Todo el comportamiento del bot se define en `src/config/bot-config.ts`. Para crear tu propio bot:
+
+1. **Define las columnas** con nombre, tipo, si son requeridas, y si tienen autoFill (ej: fecha actual)
+2. **Configura los modelos de IA** en orden de preferencia (fallback automatico si un modelo falla)
+3. **Ajusta los mensajes** de confirmacion, error, y solicitud de datos faltantes
+4. **Configura la conversacion** (TTL, si pedir datos faltantes o usar defaults)
+
+```typescript
+// src/config/bot-config.ts
+export const botConfig: BotConfig = {
+  sheets: [{
+    name: 'Ventas',
+    columns: [
+      { name: 'Fecha', type: 'date', required: true, autoFill: 'currentDate' },
+      { name: 'Clienta/e', type: 'string', required: true },
+      { name: 'Prendas', type: 'string', required: true },
+      { name: 'Monto $', type: 'number', required: true },
+      { name: 'Tipo Pago', type: 'string', required: false },
+    ],
+  }],
+  ai: {
+    models: [
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'gemma2-9b-it',
+    ],
+    temperature: 0.1,
+  },
+  conversation: {
+    askForMissing: true,
+    ttlSeconds: 300,
+  },
+};
+```
 
 ## Stack tecnologico
 
@@ -45,10 +92,11 @@ API Gateway (AWS) ──── /webhook (POST) ────> AWS Lambda (Node.js
 | Runtime | Node.js 20 |
 | Lenguaje | TypeScript (strict mode) |
 | Bot framework | [grammY](https://grammy.dev/) v1.21 |
-| AI - Transcripcion | Vercel AI SDK + Groq Whisper (`whisper-large-v3-turbo`) |
-| AI - Extraccion | Vercel AI SDK + Groq LLM (`llama-3.1-8b-instant`) |
+| AI - Transcripcion | Vercel AI SDK v4 + Groq Whisper (`whisper-large-v3-turbo`) |
+| AI - Extraccion | Vercel AI SDK v4 + Groq LLM (con fallback entre modelos) |
 | Google Sheets | `googleapis` v144 (cliente oficial de Google) |
-| Validacion | Zod v3 |
+| Validacion | Zod v3 (config schema + dynamic extraction schema) |
+| Estado conversacional | Google Sheets (hoja oculta `_state`, con TTL) |
 | Infra | AWS Lambda + API Gateway via Terraform |
 | Bundler | esbuild (custom build script) |
 | Package manager | pnpm |
@@ -59,34 +107,43 @@ API Gateway (AWS) ──── /webhook (POST) ────> AWS Lambda (Node.js
 ```
 bot-telegram-google-sheets/
 ├── src/
-│   ├── handler.ts              # Entry point de Lambda. Parsea el body de API Gateway y ejecuta bot.handleUpdate()
-│   ├── config.ts               # Validacion de env vars con Zod. Falla rapido si falta algo.
-│   ├── bot/
-│   │   └── index.ts            # Crea el bot grammY con botInfo estatica. Handlers para text y voice.
+│   ├── handler.ts              # Entry point de Lambda. Parsea body de API Gateway.
+│   ├── config.ts               # Validacion de env vars (secrets) con Zod.
+│   ├── config/
+│   │   ├── bot-config.schema.ts  # [CORE] Schema Zod del framework (columnas, AI, mensajes)
+│   │   ├── bot-config.ts         # [EDITAR] EL archivo que personalizas para tu caso de uso
+│   │   ├── helpers.ts            # Auto-genera: Zod schema de extraccion, system prompt, row builder
+│   │   └── index.ts              # Barrel con validacion al importar
 │   ├── ai/
-│   │   ├── extract.ts          # Extrae nombre de producto con Groq LLM (generateObject + Zod schema)
-│   │   └── transcribe.ts       # Transcribe audio con Groq Whisper via Vercel AI SDK
-│   └── sheets/
-│       ├── client.ts           # Singleton del cliente googleapis autenticado con JWT
-│       └── operations.ts       # CRUD: findProductInStock, markProductAsSold, appendSale, processSale
+│   │   ├── extract.ts          # Extraccion generica con fallback secuencial entre modelos
+│   │   ├── transcribe.ts       # Transcripcion de audio con Groq Whisper
+│   │   └── index.ts            # Barrel
+│   ├── sheets/
+│   │   ├── client.ts           # Singleton del cliente googleapis con JWT auth
+│   │   ├── operations.ts       # CRUD generico: appendRow, readRows, deleteRow
+│   │   └── index.ts            # Barrel
+│   ├── state/
+│   │   └── index.ts            # Estado conversacional en hoja oculta _state (con TTL)
+│   └── bot/
+│       └── index.ts            # Orquestador: AI → state → sheets → confirmacion
 ├── scripts/
-│   ├── set-webhook.ts          # Configura el webhook de Telegram con la URL de API Gateway
-│   ├── server.ts               # Servidor Express local para desarrollo (webhook local)
-│   ├── test-local.ts           # Tests manuales: extraccion AI + conexion Sheets + flujo completo
-│   └── debug-sheets.ts         # Debug: muestra el contenido de las hojas Stock y Sales
+│   ├── set-webhook.ts          # Configura webhook de Telegram
+│   ├── server.ts               # Servidor Express local para desarrollo
+│   ├── test-local.ts           # Tests manuales
+│   └── debug-sheets.ts         # Debug: muestra contenido de hojas
 ├── terraform/
-│   ├── main.tf                 # Provider AWS y version de Terraform
-│   ├── lambda.tf               # Lambda function, API Gateway, integracion y deployment
-│   ├── iam.tf                  # IAM role para Lambda con permisos basicos
-│   ├── variables.tf            # Variables: tokens, API keys, region, spreadsheet ID
-│   ├── outputs.tf              # Outputs: URL del API Gateway y nombre de la Lambda
-│   ├── terraform.tfvars.example    # Template de variables (copiar a terraform.tfvars)
-│   ├── google-credentials.json.example  # Template de credenciales Google (copiar a google-credentials.json)
-│   └── README.md               # Documentacion especifica de Terraform
-├── build.mjs                   # Build script con esbuild + plugin native-fetch (CRITICO, ver Gotchas)
-├── package.json                # Dependencias y scripts
-├── tsconfig.json               # Config TypeScript (ES2022, NodeNext, strict)
-├── .gitignore                  # Ignora node_modules, dist, .env, tfvars, credentials, tfstate
+│   ├── main.tf                 # Provider AWS
+│   ├── lambda.tf               # Lambda + API Gateway
+│   ├── iam.tf                  # IAM role
+│   ├── variables.tf            # Variables Terraform
+│   ├── outputs.tf              # URL del endpoint
+│   ├── terraform.tfvars.example    # Template (copiar a terraform.tfvars)
+│   ├── google-credentials.json.example  # Template de credenciales Google
+│   └── README.md               # Documentacion de Terraform
+├── build.mjs                   # esbuild + plugin native-fetch (CRITICO para Lambda)
+├── package.json
+├── tsconfig.json
+├── .gitignore
 └── README.md                   # Este archivo
 ```
 
@@ -94,16 +151,16 @@ bot-telegram-google-sheets/
 
 - **Node.js 20+** (IMPORTANTE: tiene que ser 20+ por el native fetch)
 - **pnpm** (package manager)
-- **AWS CLI** configurado con tus credenciales (`aws configure`)
+- **AWS CLI** configurado (`aws configure`)
 - **Terraform** >= 1.0
 - **Cuenta de Groq** ([console.groq.com](https://console.groq.com/))
 - **Proyecto en Google Cloud** con la Google Sheets API habilitada
 - **Bot de Telegram** creado via [@BotFather](https://t.me/BotFather)
-- **Google Spreadsheet** con la estructura correcta (ver paso 3)
+- **Google Spreadsheet** con los headers de tu config (ver paso 3)
 
 ## Setup paso a paso
 
-### 1. Clonar el repo e instalar dependencias
+### 1. Clonar e instalar
 
 ```bash
 git clone <url-del-repo>
@@ -113,110 +170,90 @@ pnpm install
 
 ### 2. Configurar credenciales
 
-Hay **5 credenciales** que necesitas. Aca te explico cada una, donde obtenerla y donde ponerla.
+Hay **5 credenciales** que necesitas:
 
 #### 2.1 Telegram Bot Token
 
-- **Donde obtenerlo**: Habla con [@BotFather](https://t.me/BotFather) en Telegram. Manda `/newbot`, seguí las instrucciones, y te da un token tipo `8502029031:AAH...`
+- **Donde obtenerlo**: [@BotFather](https://t.me/BotFather) → `/newbot`
 - **Donde ponerlo**: `terraform/terraform.tfvars` → `telegram_bot_token`
-- **IMPORTANTE**: Tambien necesitas el `botInfo` hardcodeado en `src/bot/index.ts`. Despues de crear el bot, hace un GET a `https://api.telegram.org/bot<TU_TOKEN>/getMe` y copia los datos (`id`, `first_name`, `username`, etc.) en el objeto `botInfo` del constructor del Bot. Esto es CRITICO para evitar timeouts en Lambda (ver Gotchas).
+- **IMPORTANTE**: Tambien necesitas el `botInfo` hardcodeado en `src/bot/index.ts`. Hace un GET a `https://api.telegram.org/bot<TU_TOKEN>/getMe` y copia los datos.
 
 #### 2.2 Groq API Key
 
-- **Donde obtenerla**: Registrate en [console.groq.com](https://console.groq.com/), anda a API Keys y creá una
+- **Donde obtenerla**: [console.groq.com](https://console.groq.com/) → API Keys
 - **Donde ponerla**: `terraform/terraform.tfvars` → `groq_api_key`
 
-#### 2.3 Google Service Account (credenciales JSON)
+#### 2.3 Google Service Account
 
-- **Donde obtenerlo**:
-  1. Anda a [Google Cloud Console](https://console.cloud.google.com/)
-  2. Crea un proyecto (o usa uno existente)
-  3. Habilita la **Google Sheets API** (buscala en "APIs & Services > Library")
-  4. Anda a **IAM & Admin > Service Accounts**
-  5. Crea un Service Account (el nombre no importa)
-  6. En la pestana **Keys**, genera una nueva key en formato **JSON**
-  7. Descargá el archivo
-- **Donde ponerlo**: Copia el contenido del JSON descargado a `terraform/google-credentials.json`
+1. [Google Cloud Console](https://console.cloud.google.com/) → proyecto
+2. Habilita **Google Sheets API** (APIs & Services > Library)
+3. **IAM & Admin > Service Accounts** → crear
+4. Generar key JSON → descargar
+5. Copiar a `terraform/google-credentials.json`
 
 ```bash
 cd terraform
 cp google-credentials.json.example google-credentials.json
-# Pega el contenido real del JSON que descargaste
+# Pega el contenido real del JSON
 ```
 
 #### 2.4 Spreadsheet ID
 
-- **Donde obtenerlo**: Abrí tu Google Sheet y mira la URL:
-  ```
-  https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit
-                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                                         ESE es el Spreadsheet ID
-  ```
-- **Donde ponerlo**: `terraform/terraform.tfvars` → `spreadsheet_id`
+Lo sacas de la URL del Google Sheet:
+```
+https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+Ponerlo en: `terraform/terraform.tfvars` → `spreadsheet_id`
 
 #### 2.5 Webhook Secret
 
-- **Donde obtenerlo**: Generalo vos, cualquier string random. Ejemplo:
-  ```bash
-  openssl rand -hex 32
-  ```
-- **Donde ponerlo**: `terraform/terraform.tfvars` → `webhook_secret`
+Cualquier string random:
+```bash
+openssl rand -hex 32
+```
+Ponerlo en: `terraform/terraform.tfvars` → `webhook_secret`
 
-#### Resumen: crear `terraform.tfvars`
+#### Resumen: crear terraform.tfvars
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
 ```
 
-Edita `terraform.tfvars` con tus valores:
+Editar con tus valores:
 
 ```hcl
 aws_region         = "us-east-1"
-telegram_bot_token = "8502029031:AAH_tu_token_real"
+telegram_bot_token = "tu_token"
 webhook_secret     = "un_string_random_largo"
-groq_api_key       = "gsk_tu_api_key_de_groq"
-spreadsheet_id     = "1AbCdEfGhIjKlMnOpQrStUvWxYz"
+groq_api_key       = "gsk_tu_api_key"
+spreadsheet_id     = "tu_spreadsheet_id"
 ```
 
 ### 3. Configurar Google Sheets
 
-Crea un Google Spreadsheet con **dos hojas** (sheets/tabs):
+Crea una hoja con los headers que matcheen tu config. Para el ejemplo de ventas:
 
-#### Hoja "Stock"
+#### Hoja "Ventas"
 
-| Producto | Estado | Precio |
-|---|---|---|
-| Zapatillas Nike | Disponible | 45000 |
-| Buzo Adidas | Disponible | 32000 |
-| Campera North Face | Vendido | 89000 |
-| Remera Puma | Disponible | 15000 |
+| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago |
+|---|---|---|---|---|
+| | | | | |
 
-- **Columna A (Producto)**: nombre del producto
-- **Columna B (Estado)**: `Disponible` o `Vendido`. El bot busca solo los que dicen `Disponible` (case-insensitive) y los cambia a `Vendido` cuando se procesa una venta.
-- **Columna C (Precio)**: precio numerico (sin simbolo $)
-- **Fila 1**: headers (el bot los skipea, arranca de la fila 2)
+La primera fila son los headers. El bot appendea datos a partir de la fila 2.
 
-#### Hoja "Sales"
-
-| Producto | Fecha | Precio |
-|---|---|---|
-| Zapatillas Nike | 2025-01-15 | 45000 |
-
-- **Columna A (Producto)**: nombre del producto vendido (copiado de Stock)
-- **Columna B (Fecha)**: fecha de la venta en formato `YYYY-MM-DD` (generada automaticamente)
-- **Columna C (Precio)**: precio (copiado de Stock)
-- El bot usa `append`, asi que las ventas se agregan al final de la hoja automaticamente.
+La hoja oculta `_state` se crea automaticamente la primera vez que el bot necesita guardar estado conversacional.
 
 #### COMPARTIR CON EL SERVICE ACCOUNT
 
-Esto es **CRITICO** y se olvida siempre:
+**CRITICO** (se olvida siempre):
 
-1. Abrí el archivo `terraform/google-credentials.json`
-2. Busca el campo `client_email` (algo como `mi-bot@mi-proyecto.iam.gserviceaccount.com`)
-3. Anda al Google Sheet → Compartir → Agrega ese email como **Editor**
+1. Abri `terraform/google-credentials.json`
+2. Busca el campo `client_email`
+3. En el Google Sheet → Compartir → Agregar ese email como **Editor**
 
-Sin esto, el bot va a tirar un error 403 al intentar leer o escribir la hoja.
+Sin esto, el bot tira error 403.
 
 ### 4. Build
 
@@ -224,262 +261,174 @@ Sin esto, el bot va a tirar un error 403 al intentar leer o escribir la hoja.
 pnpm build
 ```
 
-Esto ejecuta `build.mjs` que usa esbuild para bundlear todo en un solo archivo `dist/handler.js` (formato CommonJS, target Node 20).
+Ejecuta `build.mjs` con esbuild → produce `dist/handler.js` (CJS, target Node 20).
 
 ### 5. Deploy con Terraform
 
 ```bash
 cd terraform
 terraform init      # Solo la primera vez
-terraform plan      # Ver que cambios se van a aplicar
-terraform apply     # Aplicar (te pide confirmacion)
+terraform plan      # Ver cambios
+terraform apply     # Aplicar
 ```
 
-Terraform crea:
-- Lambda function (`telegram-bot-sheets`) con 512MB RAM y 60s timeout
-- API Gateway REST API con un endpoint `/webhook` (POST)
-- IAM role con permisos basicos de ejecucion
-- Las env vars de la Lambda con todos los secrets
+Terraform crea: Lambda (512MB, 60s timeout) + API Gateway (`/webhook` POST) + IAM role + env vars.
 
-Despues del `apply`, Terraform muestra los outputs:
-- `api_endpoint`: la URL del API Gateway (algo como `https://xxx.execute-api.us-east-1.amazonaws.com/prod`)
-- `lambda_function_name`: `telegram-bot-sheets`
-
-### 6. Configurar el webhook de Telegram
-
-Necesitas decirle a Telegram que mande los updates a tu API Gateway. La URL del webhook es:
-
-```
-{api_endpoint}/webhook
-```
-
-Por ejemplo: `https://xxx.execute-api.us-east-1.amazonaws.com/prod/webhook`
-
-#### Opcion A: Script incluido
-
-Crea un archivo `.env` en la raiz con:
-
-```env
-TELEGRAM_BOT_TOKEN=tu_token
-WEBHOOK_SECRET=tu_secret
-```
-
-Y ejecuta:
+### 6. Configurar webhook de Telegram
 
 ```bash
+# Opcion A: script incluido (necesita .env con TELEGRAM_BOT_TOKEN y WEBHOOK_SECRET)
 npx tsx scripts/set-webhook.ts https://xxx.execute-api.us-east-1.amazonaws.com/prod/webhook
-```
 
-#### Opcion B: curl directo
-
-```bash
-curl -X POST "https://api.telegram.org/bot<TU_TOKEN>/setWebhook" \
+# Opcion B: curl directo
+curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://xxx.execute-api.us-east-1.amazonaws.com/prod/webhook", "secret_token": "<TU_WEBHOOK_SECRET>"}'
+  -d '{"url": "https://xxx.execute-api.us-east-1.amazonaws.com/prod/webhook", "secret_token": "<SECRET>"}'
+
+# Verificar
+curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 ```
 
-#### Verificar que funciona
+### 7. Deploy rapido (solo codigo)
 
 ```bash
-curl "https://api.telegram.org/bot<TU_TOKEN>/getWebhookInfo"
-```
-
-Deberia mostrar la URL del webhook y `pending_update_count: 0`.
-
-### 7. Deploy rapido (solo codigo, sin cambiar infra)
-
-Si solo cambiaste codigo TypeScript y no la infraestructura de Terraform:
-
-```bash
+# Windows (PowerShell)
 pnpm build && powershell -Command "Compress-Archive -Path dist/handler.js -DestinationPath dist/lambda.zip -Force" && aws lambda update-function-code --function-name telegram-bot-sheets --zip-file fileb://dist/lambda.zip
-```
 
-En Linux/Mac reemplaza el `powershell` por:
-
-```bash
+# Linux/Mac
 pnpm build && cd dist && zip lambda.zip handler.js && cd .. && aws lambda update-function-code --function-name telegram-bot-sheets --zip-file fileb://dist/lambda.zip
 ```
+
+## Como personalizar el bot
+
+Para adaptar el bot a **tu caso de uso** (ej: gastos, inventario, leads, etc.):
+
+1. **Edita `src/config/bot-config.ts`**:
+   - Cambia el nombre de la hoja y las columnas
+   - Ajusta que campos son requeridos, tipos, y autoFill
+   - Personaliza los mensajes de confirmacion/error
+   - Elige los modelos de IA en orden de preferencia
+
+2. **Crea la hoja en Google Sheets** con headers que matcheen los `name` de tus columnas
+
+3. **Build + deploy** (ver paso 7)
+
+### Tipos de columna soportados
+
+| Tipo | Descripcion |
+|---|---|
+| `string` | Texto libre |
+| `number` | Numero (la IA extrae el valor numerico) |
+| `date` | Fecha (formato configurable) |
+| `enum` | Valor de una lista predefinida (ej: "Efectivo", "Transferencia") |
+
+### AutoFill
+
+| Valor | Que hace |
+|---|---|
+| `currentDate` | Llena automaticamente con la fecha actual |
+| `currentDateTime` | Llena con fecha y hora actual |
+
+### Fallback de modelos
+
+Si un modelo de Groq falla (429 rate limit, 503 overloaded, timeout), el bot automaticamente intenta con el siguiente modelo de la lista. Ejemplo de config:
+
+```typescript
+ai: {
+  models: [
+    'llama-3.3-70b-versatile',    // Mejor calidad, pero rate-limited
+    'llama-3.1-8b-instant',       // Rapido y confiable
+    'gemma2-9b-it',               // Fallback final
+  ],
+}
+```
+
+### Flujo conversacional
+
+Si `conversation.askForMissing` es `true`, cuando faltan campos el bot:
+1. Guarda los datos parciales en la hoja oculta `_state`
+2. Le pregunta al usuario por los campos faltantes
+3. Cuando el usuario responde, combina los datos nuevos con los guardados
+4. Si tiene todos los campos requeridos → appendea la fila
+5. El estado expira despues de `ttlSeconds` (default: 300s = 5 min)
 
 ## Scripts de desarrollo
 
 | Comando | Que hace |
 |---|---|
-| `pnpm build` | Bundlea el proyecto con esbuild a `dist/handler.js` |
-| `pnpm dev:server` | Levanta un servidor Express local en el puerto 3000 para desarrollo |
-| `pnpm test-local` | Corre tests manuales: extraccion AI + conexion Sheets + flujo completo de venta |
-| `pnpm debug-sheets` | Muestra todo el contenido de las hojas Stock y Sales (para debugging) |
+| `pnpm build` | Bundlea con esbuild a `dist/handler.js` |
+| `pnpm dev:server` | Servidor Express local en puerto 3000 |
+| `pnpm test-local` | Tests manuales: AI + Sheets + flujo completo |
+| `pnpm debug-sheets` | Muestra contenido de las hojas |
 
-Para los scripts locales necesitas un `.env` en la raiz con las mismas variables que usa Lambda:
+Para scripts locales, crea `.env` en la raiz:
 
 ```env
 TELEGRAM_BOT_TOKEN=tu_token
 WEBHOOK_SECRET=tu_secret
 GROQ_API_KEY=gsk_xxx
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
-SPREADSHEET_ID=1AbCdEfGhIjKlMnOpQrStUvWxYz
+SPREADSHEET_ID=tu_spreadsheet_id
 ```
 
-**NOTA**: `GOOGLE_SERVICE_ACCOUNT_JSON` en el `.env` va todo en una sola linea como JSON stringificado.
-
-## Gotchas y problemas conocidos
-
-Esta seccion es **la mas importante** para quien quiera replicar o mantener este proyecto. Cada uno de estos puntos represento horas de debugging.
-
-### 1. grammY + esbuild + Lambda: el problema de node-fetch
-
-**Problema**: grammY internamente usa `node-fetch` y `abort-controller`. Cuando esbuild bundlea todo, incluye esos paquetes. Pero en Node 20+ ya existen `fetch`, `AbortController`, etc. como globals nativos. El bundle termina con dos implementaciones de fetch que se pisan.
-
-**Solucion**: El archivo `build.mjs` tiene un plugin de esbuild (`nativeFetchPlugin`) que intercepta los imports de `node-fetch` y `abort-controller` y los reemplaza con los globals nativos:
-
-```javascript
-build.onResolve({ filter: /^node-fetch$/ }, () => ({
-  path: 'node-fetch',
-  namespace: 'native-fetch',
-}));
-build.onLoad({ filter: /.*/, namespace: 'native-fetch' }, () => ({
-  contents: `
-    module.exports = fetch;
-    module.exports.default = fetch;
-    module.exports.Request = Request;
-    module.exports.Response = Response;
-    module.exports.Headers = Headers;
-  `,
-  loader: 'js',
-}));
-```
-
-**NO marques `node-fetch` como `external`** en esbuild. Lambda no tiene ese paquete instalado, y vas a recibir un `Cannot find module 'node-fetch'` en runtime.
-
-### 2. bot.init() causa timeout en Lambda
-
-**Problema**: Si creas el bot con `new Bot(token)` sin pasar `botInfo`, grammY llama `bot.init()` automaticamente la primera vez que procesa un update. Eso hace un GET a `https://api.telegram.org/bot.../getMe`. En un cold start de Lambda, esto puede causar un timeout de 60 segundos.
-
-**Solucion**: Pasar `botInfo` estatica en el constructor:
-
-```typescript
-const bot = new Bot(config.TELEGRAM_BOT_TOKEN, {
-  botInfo: {
-    id: 8502029031,
-    is_bot: true,
-    first_name: 'BotSheetsGoogle',
-    username: 'GoogleSheetsNachoTest150397_bot',
-    can_join_groups: true,
-    can_read_all_group_messages: false,
-    supports_inline_queries: false,
-  },
-});
-```
-
-Para obtener estos valores, hace un GET a `https://api.telegram.org/bot<TU_TOKEN>/getMe` y copia la respuesta.
-
-### 3. API Gateway vs Function URL: formato del evento
-
-**Problema**: grammY tiene `webhookCallback(bot, 'aws-lambda-async')` que espera el formato de **Function URL** de Lambda (donde el body ya viene parseado). Con **API Gateway** (proxy integration), el body viene como JSON string.
-
-**Solucion**: NO usar `webhookCallback`. En `handler.ts` parseamos manualmente:
-
-```typescript
-const update = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
-await bot.handleUpdate(update);
-```
-
-### 4. Corrupcion de credenciales Google (private key)
-
-**Problema**: Si la private key en `google-credentials.json` se trunca (ej: no termina con `-----END PRIVATE KEY-----`), vas a recibir un error `ERR_OSSL_UNSUPPORTED` críptico al intentar autenticar con Google.
-
-**Solucion**: Verificar que el JSON tenga la key completa. Tiene que empezar con `-----BEGIN PRIVATE KEY-----` y terminar con `-----END PRIVATE KEY-----\n`. Los `\n` dentro de la key son saltos de linea (es normal que aparezcan asi en JSON).
-
-### 5. Lambda container reuse (codigo viejo)
-
-**Problema**: Despues de deployar codigo nuevo, Lambda puede seguir usando containers viejos con el codigo anterior. Esto pasa porque Lambda reutiliza containers "warm".
-
-**Solucion**: Mira los logs en CloudWatch. Busca un log `INIT_START` que confirme que se inicio un container nuevo con tu codigo actualizado. Si no lo ves, espera unos minutos o invoca la funcion varias veces para forzar el recycle.
-
-### 6. googleapis vs google-spreadsheet
-
-**Problema**: Inicialmente se uso el paquete npm `google-spreadsheet` (wrapper simplificado). Tenia problemas de autenticacion en Lambda por cosas internas del manejo de JWT.
-
-**Solucion**: Se migro al cliente oficial `googleapis`. Es mas verboso pero funciona perfecto en Lambda. El paquete `google-spreadsheet` sigue en `package.json` como dependencia residual, pero no se usa.
-
-### 7. Variables de entorno en Terraform
-
-Las credenciales de Google se cargan desde el archivo `terraform/google-credentials.json` usando `file()` de Terraform y se pasan como una env var `GOOGLE_SERVICE_ACCOUNT_JSON` a Lambda. Esto significa que **todo el JSON del service account** se mete en una variable de entorno. Funciona, pero tiene un limite de 4KB total para todas las env vars de Lambda (en la practica, sobra).
-
-### 8. El bot crea la instancia fuera del handler
-
-En `handler.ts`, la linea `const bot = createBot()` esta **fuera** del handler. Esto es intencional: Lambda reutiliza el contexto entre invocaciones ("warm container"), asi que el bot se crea una sola vez y se reutiliza. Lo mismo aplica para el cliente de Google Sheets (`sheetsClient` singleton en `client.ts`).
+**NOTA**: `GOOGLE_SERVICE_ACCOUNT_JSON` va todo en una sola linea como JSON stringificado.
 
 ## Variables de entorno
 
 | Variable | Descripcion | Donde se configura |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Token del bot de Telegram | `terraform.tfvars` |
-| `WEBHOOK_SECRET` | Secret para verificar webhook de Telegram | `terraform.tfvars` |
-| `GROQ_API_KEY` | API key de Groq para AI | `terraform.tfvars` |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON completo del Service Account de Google | `terraform/google-credentials.json` (se carga via `file()`) |
+| `WEBHOOK_SECRET` | Secret para verificar webhook | `terraform.tfvars` |
+| `GROQ_API_KEY` | API key de Groq | `terraform.tfvars` |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON del Service Account de Google | `terraform/google-credentials.json` |
 | `SPREADSHEET_ID` | ID del Google Spreadsheet | `terraform.tfvars` |
-| `AWS_REGION` | Region de AWS (default: `us-east-1`) | `terraform.tfvars` |
 
 ## Costos
 
 | Servicio | Costo |
 |---|---|
-| AWS Lambda | $0 (free tier: 1M invocaciones/mes + 400.000 GB-s) |
+| AWS Lambda | $0 (free tier: 1M invocaciones/mes) |
 | API Gateway | $0 (free tier: 1M llamadas/mes por 12 meses) |
 | Groq AI | $0 (free tier generoso) |
 | Google Sheets API | $0 |
 | Telegram Bot API | $0 |
 
-Para un bot personal o de bajo trafico, esto corre 100% gratis.
+**Costo total: $0** para uso personal o bajo trafico.
 
-## Pendientes
+## Gotchas y problemas conocidos
 
-- [ ] Testear mensajes de audio/voz end-to-end en Lambda (funciona en local, falta validar en prod)
-- [ ] Limpiar la dependencia `google-spreadsheet` del `package.json` (no se usa, quedo residual)
-- [ ] Agregar manejo de errores mas granular (ej: diferenciar "producto no encontrado" de "error de Sheets")
-- [ ] Agregar un comando `/stock` para listar productos disponibles
-- [ ] Agregar un comando `/ventas` para ver las ultimas ventas
+### 1. grammY + esbuild + Lambda: node-fetch
 
-## Como funciona cada modulo (referencia tecnica)
+grammY usa `node-fetch` internamente. En Node 20+ ya existe `fetch` nativo. `build.mjs` tiene un plugin que reemplaza `node-fetch` con los globals nativos. **NO marques `node-fetch` como `external`** en esbuild.
 
-### `src/config.ts`
+### 2. bot.init() causa timeout en Lambda
 
-Usa Zod para validar que todas las env vars requeridas existan al iniciar. Si falta alguna, la Lambda falla inmediatamente con un error claro en vez de fallar misteriosamente despues.
+Pasar `botInfo` estatica en el constructor del Bot para evitar que grammY haga un GET a Telegram en cada cold start. Obtener los datos via `getMe`.
 
-### `src/handler.ts`
+### 3. API Gateway vs Function URL
 
-Entry point de Lambda. Crea el bot una sola vez (fuera del handler), y en cada invocacion:
-1. Verifica el `X-Telegram-Bot-Api-Secret-Token` header
-2. Parsea el body (API Gateway lo manda como string)
-3. Ejecuta `bot.handleUpdate(update)`
-4. Retorna 200 OK o 500
+NO usar `webhookCallback()` de grammY. Parsear el body manualmente en `handler.ts` porque API Gateway manda el body como JSON string.
 
-### `src/bot/index.ts`
+### 4. Corrupcion de credenciales Google
 
-Factory function que crea y configura el bot grammY. Registra dos handlers:
-- `message:text` → extrae producto con AI → procesa venta
-- `message:voice` → descarga audio → transcribe con Whisper → extrae producto → procesa venta
+Si la private key en `google-credentials.json` se trunca → error `ERR_OSSL_UNSUPPORTED`. Verificar que la key empiece con `-----BEGIN PRIVATE KEY-----` y termine con `-----END PRIVATE KEY-----\n`.
 
-### `src/ai/extract.ts`
+### 5. Lambda container reuse
 
-Usa Vercel AI SDK con Groq (`llama-3.1-8b-instant`) para extraer el nombre del producto de un mensaje en lenguaje natural. Retorna un objeto tipado con `productName` y `confidence` (high/medium/low). Si la confianza es "low", el bot pide al usuario que reformule.
+Despues de deployar, Lambda puede seguir usando containers viejos. Buscar `INIT_START` en CloudWatch para confirmar que se inicio un container nuevo.
 
-### `src/ai/transcribe.ts`
+### 6. googleapis vs google-spreadsheet
 
-Usa Vercel AI SDK con Groq Whisper (`whisper-large-v3-turbo`) para transcribir audio a texto. Configurado para espanol.
+Se usa `googleapis` (cliente oficial). El wrapper `google-spreadsheet` tenia problemas de auth en Lambda.
 
-### `src/sheets/client.ts`
+### 7. Variables de entorno en Terraform
 
-Crea un cliente singleton de `googleapis` autenticado con JWT usando las credenciales del Service Account. Se reutiliza entre invocaciones de Lambda (container reuse).
+Las credenciales Google se cargan con `file()` de Terraform como env var. Limite de 4KB total para env vars de Lambda (en la practica sobra).
 
-### `src/sheets/operations.ts`
+### 8. Instancia del bot fuera del handler
 
-Operaciones CRUD sobre Google Sheets:
-- `findProductInStock(name)`: busca un producto por nombre (match parcial, case-insensitive) que este "Disponible"
-- `markProductAsSold(rowIndex)`: cambia el estado a "Vendido"
-- `appendSale(record)`: agrega una fila a la hoja Sales
-- `processSale(name)`: orquesta todo el flujo de venta (buscar → marcar → registrar)
+El bot se crea **una sola vez** fuera del handler de Lambda para aprovechar container reuse. Lo mismo el cliente de Google Sheets.
 
-### `build.mjs`
+## Licencia
 
-Script de esbuild con un plugin custom (`nativeFetchPlugin`) que reemplaza `node-fetch` y `abort-controller` con los globals nativos de Node 20. Bundlea todo en un solo archivo CJS (`dist/handler.js`) con source maps.
+MIT

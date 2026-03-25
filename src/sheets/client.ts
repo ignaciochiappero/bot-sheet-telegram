@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { config } from '../config.js';
 
+/** Singleton Sheets client — reused across Lambda invocations */
 let sheetsClient: ReturnType<typeof google.sheets> | null = null;
 
 export function getSheetsClient() {
