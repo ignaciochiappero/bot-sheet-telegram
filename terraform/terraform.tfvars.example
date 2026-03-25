@@ -1,0 +1,15 @@
+# Rename this file to terraform.tfvars and fill in your values
+
+aws_region = "us-east-1"
+
+# Get from @BotFather on Telegram
+telegram_bot_token = "YOUR_TELEGRAM_BOT_TOKEN"
+
+# Random secret for webhook verification
+webhook_secret = "YOUR_RANDOM_WEBHOOK_SECRET"
+
+# Get from https://console.groq.com/
+groq_api_key = "YOUR_GROQ_API_KEY"
+
+# Get from Google Sheets URL: https://docs.google.com/spreadsheets/d/{THIS_IS_THE_ID}/edit
+spreadsheet_id = "YOUR_GOOGLE_SPREADSHEET_ID"

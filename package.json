@@ -1,0 +1,36 @@
+{
+  "name": "bot-telegram-google-sheets",
+  "version": "1.0.0",
+  "description": "Telegram bot with AI that updates Google Sheets inventory",
+  "main": "dist/handler.js",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "tsx src/handler.ts",
+    "dev:server": "tsx scripts/server.ts",
+    "test-local": "tsx scripts/test-local.ts",
+    "debug-sheets": "tsx scripts/debug-sheets.ts",
+    "deploy": "npm run build && cd terraform && terraform apply",
+    "deploy:plan": "npm run build && cd terraform && terraform plan"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^1.0.7",
+    "ai": "^4.1.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1",
+    "google-spreadsheet": "^5.2.0",
+    "googleapis": "^144.0.0",
+    "grammy": "^1.21.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.5",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
