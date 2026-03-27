@@ -30,10 +30,10 @@ export function buildExtractionSchema(sheet: SheetConfig): z.ZodObject<Record<st
         break;
     }
 
-    // If not required, make nullable so AI can return null for missing data
-    if (!col.required) {
-      field = field.nullable();
-    }
+    // ALWAYS make nullable in the extraction schema so the AI can return null
+    // for data it can't find in the message. We detect missing required fields
+    // later via findMissingFields() and ask the user conversationally.
+    field = field.nullable();
 
     shape[col.name] = field;
   }

@@ -57,6 +57,12 @@ export const botConfig: BotConfig = {
           required: true,
           description: "Talle de la prenda",
         },
+        {
+          name: "Color",
+          type: "string",
+          required: true,
+          description: "Color de la prenda",
+        },
       ],
     },
   ],
@@ -89,7 +95,7 @@ export const botConfig: BotConfig = {
   messages: {
     welcome: "¡Hola! Enviame los datos de una venta y la registro.",
     confirmation:
-      "✅ Registrado: {{Clienta/e}} — {{Prendas}} — ${{Monto $}} — {{Tipo Pago}}",
+      "✅ Registrado: {{Clienta/e}} — {{Prendas}} — ${{Monto $}} — {{Tipo Pago}} - {{Medida}} - {{Color}}",
     error: "Ocurrió un error procesando tu mensaje. Intentalo de nuevo.",
   },
 };
