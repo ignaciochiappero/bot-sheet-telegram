@@ -6,35 +6,52 @@
 
 El bot es **conversacional**: si la IA no puede extraer todos los campos requeridos de un solo mensaje, le pregunta al usuario por los datos faltantes. Todo el comportamiento se define en un **unico archivo de configuracion** (`src/config/bot-config.ts`).
 
+Ademas incluye un **modulo de Google Apps Script** que monitorea emails de **Empretienda** y registra automaticamente las ventas online en la misma hoja, con notificacion por Telegram.
+
 ### Caso de uso incluido: Registro de ventas
 
 La config de ejemplo registra ventas en una hoja "Ventas" con las columnas:
 
-| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago |
-|---|---|---|---|---|
-| 2025-01-15 | María | Remera negra + Jean | 45000 | Efectivo |
+| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago | Medida | Color | Origen | Pedido # | Email Cliente | Telefono | DNI | Direccion |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2025-01-15 | Maria | Remera negra | 45000 | Efectivo | M | Negro | Manual | - | - | - | - | - |
+| 2025-01-16 | Ignacio Chiappero | OXFORD Elastizado Plus Size | 35000 | Transferencia (Pendiente) | Plus Size | Azul Clasico | Empretienda | 1 | igna@gmail.com | 54342... | 40267766 | Castellanos 2384, Santa Fe |
 
-El usuario le manda al bot algo como _"María compró una remera y un jean por 45 lucas en efectivo"_ y el bot extrae todo automaticamente.
+Las ventas llegan de **dos fuentes**:
+- **Manual** (via Telegram): el usuario le manda al bot _"Maria compro una remera negra talle M por 45 lucas en efectivo"_ y el bot extrae todo automaticamente
+- **Automatica** (via email): cuando llega una orden de Empretienda, el Apps Script parsea el email y registra la venta
 
 ## Arquitectura
 
 ```
-Usuario (Telegram)
-    |
-    | HTTPS POST (webhook)
-    v
-API Gateway (AWS) ────> AWS Lambda (Node.js 20)
-                            |
-                            v
-                      grammY Bot Router
-                            |
-              ┌─────────────┼──────────────────┐
-              v             v                  v
-        Groq AI        Groq AI          Google Sheets API
-       (Whisper)    (LLM + Fallback)    (googleapis)
-      Transcribe    Extract data         Append row
-        audio       con Zod schema       Read/Write state
+                          ┌─────────────────────────┐
+                          │      Google Sheets       │
+                          │    (hoja "Ventas")       │
+                          └────────▲────────▲────────┘
+                                   │        │
+              ┌────────────────────┘        └────────────────────┐
+              │                                                  │
+    ┌─────────┴──────────┐                          ┌────────────┴───────────┐
+    │   AWS Lambda        │                          │   Google Apps Script   │
+    │   (Bot Telegram)    │                          │   (Email Parser)       │
+    │                     │                          │                        │
+    │  grammY Bot Router  │                          │  Trigger: cada 15 min  │
+    │        │            │                          │        │               │
+    │  ┌─────┼──────┐    │                          │  Gmail API             │
+    │  v     v      v    │                          │  (emails Empretienda)  │
+    │ Whisper LLM Sheets │                          │        │               │
+    │         Fallback    │                          │  HTML Parser + Regex   │
+    └─────────────────────┘                          │        │               │
+              ▲                                      │  Telegram Notify       │
+              │ HTTPS POST (webhook)                 └────────────────────────┘
+              │
+      Usuario (Telegram)
 ```
+
+### Dos sistemas independientes
+
+1. **Bot Telegram (Lambda)**: recibe mensajes manuales → AI extrae datos → Google Sheets. Origen = "Manual".
+2. **Email Parser (Apps Script)**: cada 15 min busca emails de Empretienda → parsea HTML → Google Sheets + notifica por Telegram. Origen = "Empretienda".
 
 ### Flujo detallado
 
@@ -97,6 +114,7 @@ export const botConfig: BotConfig = {
 | Google Sheets | `googleapis` v144 (cliente oficial de Google) |
 | Validacion | Zod v3 (config schema + dynamic extraction schema) |
 | Estado conversacional | Google Sheets (hoja oculta `_state`, con TTL) |
+| Email parser | Google Apps Script (trigger cada 15 min) |
 | Infra | AWS Lambda + API Gateway via Terraform |
 | Bundler | esbuild (custom build script) |
 | Package manager | pnpm |
@@ -140,6 +158,11 @@ bot-telegram-google-sheets/
 │   ├── terraform.tfvars.example    # Template (copiar a terraform.tfvars)
 │   ├── google-credentials.json.example  # Template de credenciales Google
 │   └── README.md               # Documentacion de Terraform
+├── apps-script/
+│   ├── Config.gs              # Constantes: spreadsheet ID, columnas, labels de Gmail
+│   ├── Code.gs                # Orquestador: trigger, busqueda de emails, labels
+│   ├── EmailParser.gs         # Parseo de HTML de emails de Empretienda
+│   └── SheetWriter.gs         # Escritura en VENTAS + chequeo duplicados + notif Telegram
 ├── build.mjs                   # esbuild + plugin native-fetch (CRITICO para Lambda)
 ├── package.json
 ├── tsconfig.json
@@ -237,9 +260,9 @@ Crea una hoja con los headers que matcheen tu config. Para el ejemplo de ventas:
 
 #### Hoja "Ventas"
 
-| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago |
-|---|---|---|---|---|
-| | | | | |
+| Fecha | Clienta/e | Prendas | Monto $ | Tipo Pago | Medida | Color | Origen | Pedido # | Email Cliente | Telefono | DNI | Direccion |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | | | | |
 
 La primera fila son los headers. El bot appendea datos a partir de la fila 2.
 
@@ -254,6 +277,10 @@ La hoja oculta `_state` se crea automaticamente la primera vez que el bot necesi
 3. En el Google Sheet → Compartir → Agregar ese email como **Editor**
 
 Sin esto, el bot tira error 403.
+
+#### COMPARTIR CON LA CUENTA DEL EMAIL PARSER
+
+Si el Apps Script corre bajo una cuenta diferente (ej: la cuenta que recibe los emails de Empretienda), esa cuenta tambien necesita acceso **Editor** al spreadsheet.
 
 ### 4. Build
 
@@ -289,7 +316,44 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 ```
 
-### 7. Deploy rapido (solo codigo)
+### 7. Setup del Email Parser (Apps Script)
+
+El modulo de Apps Script monitorea emails de Empretienda y registra las ventas automaticamente.
+
+#### Requisitos
+
+- **Cuenta de Gmail** que recibe los emails de Empretienda (ej: la cuenta de la tienda)
+- **Acceso Editor** al Google Sheet desde esa cuenta
+
+#### Pasos
+
+1. Iniciar sesion en [script.google.com](https://script.google.com) con la cuenta que recibe los emails de Empretienda
+2. Crear un nuevo proyecto
+3. Copiar los 4 archivos de `apps-script/` como archivos `.gs` separados:
+   - `Config.gs` — editar `SPREADSHEET_ID` con el ID real del spreadsheet
+   - `Code.gs`
+   - `EmailParser.gs`
+   - `SheetWriter.gs`
+4. Configurar credenciales en **Configuracion del proyecto → Propiedades del script**:
+   - `BOT_TOKEN`: el token del bot de Telegram (mismo que usa Lambda)
+   - `OWNER_CHAT_ID`: el chat ID donde llegan las notificaciones (obtenerlo via [@userinfobot](https://t.me/userinfobot) en Telegram)
+5. Ejecutar `createLabels()` una vez (crea labels de Gmail: `Empretienda/Procesado` y `Empretienda/Error`)
+6. Ejecutar `setupTrigger()` una vez (configura trigger cada 15 minutos)
+
+#### Como funciona
+
+- Cada 15 minutos busca emails de `notificaciones@empretienda.com` con subject "nueva orden" que no tengan el label `Empretienda/Procesado`
+- Parsea el HTML del email extrayendo: productos, precio, metodo de pago, datos del cliente
+- Escribe una fila en VENTAS con `Origen = "Empretienda"`
+- Detecta duplicados por numero de orden (no inserta la misma orden dos veces)
+- Marca el email con label `Empretienda/Procesado` (o `Empretienda/Error` si fallo)
+- Envia notificacion por Telegram con el resumen de la venta
+
+#### Costo
+
+$0 — Google Apps Script es gratuito para cuentas personales de Gmail.
+
+### 8. Deploy rapido (solo codigo)
 
 ```bash
 # Windows (PowerShell)
@@ -428,6 +492,14 @@ Las credenciales Google se cargan con `file()` de Terraform como env var. Limite
 ### 8. Instancia del bot fuera del handler
 
 El bot se crea **una sola vez** fuera del handler de Lambda para aprovechar container reuse. Lo mismo el cliente de Google Sheets.
+
+### 9. Apps Script: getPlainBody() vs getBody()
+
+El parser usa `getBody()` (HTML) en vez de `getPlainBody()` (texto plano). El HTML de Empretienda es la fuente estructurada confiable. El plain text pierde la estructura y produce parsing inconsistente.
+
+### 10. Apps Script: un thread = una orden
+
+Los threads de Gmail pueden tener multiples mensajes. El parser procesa solo el primer mensaje de cada thread y sale (`break`), evitando duplicados innecesarios.
 
 ## Licencia
 
